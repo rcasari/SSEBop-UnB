@@ -1,7 +1,16 @@
 # SSEBop-UnB
 Python Script created for SSEBop calculation using satellite images and  UAV Images
 
+📝 Papers:
+
 https://doi.org/10.1590/0102-77863910007
+
+Authorship:
+
+Leandro Salles
+
+Modified by Raphael Casari
+
 
 
 📌 SSEBop Evapotranspiration Processor
