@@ -1,147 +1,121 @@
 # -*- coding: utf-8 -*-
 """
 Created on Sun Nov 11 15:27:06 2018
-
-@author: LeandroSalles
+Author: Leandro Salles
 """
-
 import rasterio
 import xarray as xr
 import numpy as np
 import pandas as pd
 import os
 
-
-
-
 def rasterio_to_xarray(fname):
-    """Converts the given file to an xarray.DataArray object.
-    Arguments:
-     - `fname`: the filename of the rasterio-compatible file to read
+    """
+    Converte um arquivo compatível com rasterio para um objeto xarray.DataArray.
+
+    Args:
+        fname (str): Nome do arquivo rasterio-compatível a ser lido.
+
     Returns:
-        An xarray.DataArray object containing the data from the given file,
-        along with the relevant geographic metadata.
-    Notes:
-    This produces an xarray.DataArray object with two dimensions: x and y.
-    The co-ordinates for these dimensions are set based on the geographic
-    reference defined in the original file.
-    This has only been tested with GeoTIFF files: use other types of files
-    at your own risk!"""
-#    with rasterio.drivers():
+        xarray.DataArray: Objeto xarray.DataArray contendo os dados do arquivo, 
+        juntamente com os metadados geográficos relevantes.
+    """
     with rasterio.open(fname) as src:
         data = src.read(1)
-
-        # Set values to nan wherever they are equal to the nodata
-        # value defined in the input file
         data = np.where(data == src.nodata, np.nan, data)
-
-        # Get coords
+        
+        # Dimensões e coordenadas
         nx, ny = src.width, src.height
         x0, y0 = src.bounds.left, src.bounds.top
         dx, dy = src.res[0], -src.res[1]
         
-        lat= np.arange(start=y0, stop=(y0 + ny * dy), step=dy)
-        lat_coords = lat[0:ny] 
-        lon= np.arange(start=x0, stop=(x0 + nx * dx), step=dx)
-        lon_coords = lon[0:nx] 
+        lat = np.arange(start=y0, stop=(y0 + ny * dy), step=dy)
+        lon = np.arange(start=x0, stop=(x0 + nx * dx), step=dx)
         
-        
-        coords = {'latitude': lat_coords,
-                  'longitude':lon_coords}
-
+        coords = {'latitude': lat[:ny], 'longitude': lon[:nx]}
         dims = ('latitude', 'longitude')
-#            dims = ('x', 'y')
         attrs = {}
-
+        
         try:
-            aff = src.affine
+            aff = src.transform
             attrs['affine'] = aff.to_gdal()
         except AttributeError:
             pass
-
+        
         try:
             c = src.crs
             attrs['crs'] = c.to_string()
             kwargs = src.meta.copy()
-            attrs = kwargs
-            
+            attrs.update(kwargs)
         except AttributeError:
             pass
-
+    
     return xr.DataArray(data, dims=dims, coords=coords, attrs=attrs)
 
-        
-    
 def xarray_to_rasterio(xa, output_filename):
-    """Converts the given xarray.DataArray object to a raster output file
-    using rasterio.
-    Arguments:
-     - `xa`: The xarray.DataArray to convert
-     - `output_filename`: the filename to store the output GeoTIFF file in
-    Notes:
-    Converts the given xarray.DataArray to a GeoTIFF output file using rasterio.
-    This function only supports 2D or 3D DataArrays, and GeoTIFF output.
-    The input DataArray must have attributes (stored as xa.attrs) specifying
-    geographic metadata, or the output will have _no_ geographic information.
-    If the DataArray uses dask as the storage backend then this function will
-    force a load of the raw data.
     """
-    # Forcibly compute the data, to ensure that all of the metadata is
-    # the same as the actual data (ie. dtypes are the same etc)
+    Converte um objeto xarray.DataArray para um arquivo raster usando rasterio.
+
+    Args:
+        xa (xarray.DataArray): Objeto xarray.DataArray a ser convertido.
+        output_filename (str): Nome do arquivo GeoTIFF de saída.
+
+    Notes:
+        Esta função suporta apenas DataArrays 2D ou 3D e saída em GeoTIFF.
+        O DataArray de entrada deve conter atributos (armazenados em xa.attrs)
+        especificando metadados geográficos.
+    """
     xa = xa.load()
-
+    
     if len(xa.shape) == 2:
-        count = 1
-        height = xa.shape[0]
-        width = xa.shape[1]
-        band_indicies = 1
+        count, height, width = 1, xa.shape[0], xa.shape[1]
+        band_indices = [1]
     else:
-
-        count = xa.shape[0]
-        height = xa.shape[1]
-        width = xa.shape[2]
-        band_indicies = np.arange(count) + 1
-
+        count, height, width = xa.shape[0], xa.shape[1], xa.shape[2]
+        band_indices = np.arange(count) + 1
+    
     processed_attrs = {}
-
+    
     try:
         val = xa.attrs['affine']
-        processed_attrs['affine'] = rasterio.Affine.from_gdal(*val)
+        processed_attrs['transform'] = rasterio.Affine.from_gdal(*val)
     except KeyError:
         pass
-
+    
     try:
         val = xa.attrs['crs']
         processed_attrs['crs'] = rasterio.crs.CRS.from_string(val)
     except KeyError:
         pass
-
-    with rasterio.open(output_filename, 'w',
-                       driver='GTiff',
-                       height=height, width=width,
-                       dtype=str(xa.dtype), count=count,
-                       **kwargs) as dst:
-        dst.write(xa.values, band_indicies)
-
-
-
-
-
-
-
+    
+    with rasterio.open(output_filename, 'w', driver='GTiff', height=height, width=width,
+                       dtype=str(xa.dtype), count=count, **processed_attrs) as dst:
+        dst.write(xa.values, band_indices)
 
 def xarray_to_rasterio_by_band(xa, output_basename, dim='time', date_format='%Y-%m-%d'):
+    """
+    Converte um objeto xarray.DataArray para múltiplos arquivos raster, um para cada banda.
+
+    Args:
+        xa (xarray.DataArray): Objeto xarray.DataArray a ser convertido.
+        output_basename (str): Base do nome do arquivo de saída.
+        dim (str): Nome da dimensão a ser usada para separar as bandas.
+        date_format (str): Formato de data para os nomes dos arquivos.
+
+    Notes:
+        Esta função cria um arquivo GeoTIFF separado para cada banda do DataArray.
+    """
     for i in range(len(xa[dim])):
         args = {dim: i}
         data = xa.isel(**args)
         index_value = data[dim].values
-
-        if type(index_value) is np.datetime64:
-
+        
+        if isinstance(index_value, np.datetime64):
             formatted_index = pd.to_datetime(index_value).strftime(date_format)
         else:
             formatted_index = str(index_value)
-
-        filename = output_basename + formatted_index + '.tif'
+        
+        filename = f"{output_basename}{formatted_index}.tif"
         xarray_to_rasterio(data, filename)
-        print('Exported %s' % formatted_index)
+        print(f'Exported {formatted_index}')
+
